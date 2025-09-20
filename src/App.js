@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { 
   TrendingUp, 
   Bell, 
@@ -7,26 +7,22 @@ import {
   Zap,
   AlertTriangle,
   CheckCircle,
-  X
+  X,
+  LogOut,
+  User
 } from 'lucide-react';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 import Header from './components/Header';
 import Dashboard from './components/Dashboard';
 import AlertManager from './components/AlertManager';
 import TelegramSetup from './components/TelegramSetup';
 import PriceChart from './components/PriceChart';
+import AuthPage from './components/AuthPage';
 
-function App() {
+const AppContent = () => {
+  const { user, logout, loading } = useAuth();
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [telegramChatId, setTelegramChatId] = useState('');
   const [notifications, setNotifications] = useState([]);
-
-  useEffect(() => {
-    // Load saved Telegram chat ID
-    const savedChatId = localStorage.getItem('telegramChatId');
-    if (savedChatId) {
-      setTelegramChatId(savedChatId);
-    }
-  }, []);
 
   const addNotification = (message, type = 'info') => {
     // Only show success and info notifications, filter out errors
@@ -54,10 +50,54 @@ function App() {
     { id: 'settings', label: 'Settings', icon: Settings }
   ];
 
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-50 to-blue-50">
+        <div className="flex items-center space-x-3">
+          <svg className="animate-spin h-8 w-8 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span className="text-lg font-medium text-gray-700">Loading...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthPage />;
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 flex flex-col">
       {/* Header */}
       <Header />
+      
+      {/* User Info Bar */}
+      <div className="bg-white shadow-sm border-b border-gray-200">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between py-3">
+            <div className="flex items-center space-x-3">
+              <User className="w-5 h-5 text-gray-500" />
+              <span className="text-sm text-gray-700">
+                Welcome, <span className="font-medium">{user.email}</span>
+              </span>
+              {user.telegram_chat_id && (
+                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                  Telegram Connected
+                </span>
+              )}
+            </div>
+            <button
+              onClick={logout}
+              className="flex items-center space-x-2 text-sm text-gray-500 hover:text-gray-700 transition-colors"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>Logout</span>
+            </button>
+          </div>
+        </div>
+      </div>
       
       {/* Notification Area */}
       <div className="fixed top-4 right-4 z-50 space-y-2">
@@ -114,14 +154,12 @@ function App() {
       <main className="w-full px-4 sm:px-6 lg:px-8 py-8 flex-1">
         {activeTab === 'dashboard' && (
           <Dashboard 
-            telegramChatId={telegramChatId}
             onNotification={addNotification}
           />
         )}
         
         {activeTab === 'alerts' && (
           <AlertManager 
-            telegramChatId={telegramChatId}
             onNotification={addNotification}
           />
         )}
@@ -134,8 +172,6 @@ function App() {
         
         {activeTab === 'settings' && (
           <TelegramSetup 
-            telegramChatId={telegramChatId}
-            setTelegramChatId={setTelegramChatId}
             onNotification={addNotification}
           />
         )}
@@ -156,6 +192,14 @@ function App() {
         </div>
       </footer>
     </div>
+  );
+};
+
+function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   );
 }
 

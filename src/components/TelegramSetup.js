@@ -1,20 +1,25 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   MessageSquare, 
   CheckCircle, 
-  AlertTriangle,
   Shield,
   Zap,
   ExternalLink
 } from 'lucide-react';
-import axios from 'axios';
+import { useAuth } from '../contexts/AuthContext';
 
-const API_BASE_URL = 'http://localhost:5000/api';
-
-function TelegramSetup({ telegramChatId, setTelegramChatId, onNotification }) {
-  const [inputChatId, setInputChatId] = useState(telegramChatId || '');
+function TelegramSetup({ onNotification }) {
+  const { user, updateTelegramChatId } = useAuth();
+  const [inputChatId, setInputChatId] = useState('');
   const [isTesting, setIsTesting] = useState(false);
-  const [isSetup, setIsSetup] = useState(!!telegramChatId);
+  const [isSetup, setIsSetup] = useState(false);
+
+  useEffect(() => {
+    if (user && user.telegram_chat_id) {
+      setInputChatId(user.telegram_chat_id);
+      setIsSetup(true);
+    }
+  }, [user]);
 
   const handleSetup = async (e) => {
     e.preventDefault();
@@ -27,15 +32,13 @@ function TelegramSetup({ telegramChatId, setTelegramChatId, onNotification }) {
     setIsTesting(true);
     
     try {
-      const response = await axios.post(`${API_BASE_URL}/telegram/setup`, {
-        chat_id: inputChatId.trim()
-      });
+      const result = await updateTelegramChatId(inputChatId.trim());
       
-      if (response.status === 200) {
-        setTelegramChatId(inputChatId.trim());
-        localStorage.setItem('telegramChatId', inputChatId.trim());
+      if (result.success) {
         setIsSetup(true);
         onNotification('Telegram setup successful! Check your Telegram for a test message.', 'success');
+      } else {
+        onNotification(result.error || 'Failed to setup Telegram. Please check your chat ID.', 'error');
       }
     } catch (error) {
       console.error('Telegram setup error:', error);
@@ -45,12 +48,21 @@ function TelegramSetup({ telegramChatId, setTelegramChatId, onNotification }) {
     }
   };
 
-  const handleDisconnect = () => {
-    setTelegramChatId('');
-    setInputChatId('');
-    localStorage.removeItem('telegramChatId');
-    setIsSetup(false);
-    onNotification('Telegram disconnected', 'info');
+  const handleDisconnect = async () => {
+    try {
+      const result = await updateTelegramChatId('');
+      
+      if (result.success) {
+        setInputChatId('');
+        setIsSetup(false);
+        onNotification('Telegram disconnected successfully', 'success');
+      } else {
+        onNotification('Failed to disconnect Telegram', 'error');
+      }
+    } catch (error) {
+      console.error('Disconnect error:', error);
+      onNotification('Failed to disconnect Telegram', 'error');
+    }
   };
 
   return (
@@ -77,7 +89,7 @@ function TelegramSetup({ telegramChatId, setTelegramChatId, onNotification }) {
               </p>
               <div className="mt-3">
                 <p className="text-sm text-green-600 font-medium">
-                  Chat ID: {telegramChatId}
+                  Chat ID: {user?.telegram_chat_id}
                 </p>
               </div>
               <button

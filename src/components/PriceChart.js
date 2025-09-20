@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   TrendingUp, 
   BarChart3, 
@@ -7,7 +7,6 @@ import {
   DollarSign
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import axios from 'axios';
 
 const API_BASE_URL = 'http://localhost:5000/api';
 
@@ -39,19 +38,6 @@ function PriceChart({ onNotification }) {
     { value: '30d', label: '30 Days' }
   ];
 
-  // CoinGecko API mapping for cryptocurrency IDs
-  const coinGeckoMapping = {
-    'BTC': 'bitcoin',
-    'ETH': 'ethereum',
-    'ADA': 'cardano',
-    'DOT': 'polkadot',
-    'LINK': 'chainlink',
-    'UNI': 'uniswap',
-    'AAVE': 'aave',
-    'SOL': 'solana',
-    'MATIC': 'matic-network',
-    'AVAX': 'avalanche-2'
-  };
 
   // Fetch real historical data through our backend API
   const fetchRealChartData = async (symbol, range) => {
@@ -114,7 +100,7 @@ function PriceChart({ onNotification }) {
   };
 
 
-  const fetchChartData = async (retryCount = 0) => {
+  const fetchChartData = useCallback(async (retryCount = 0) => {
     const maxRetries = 5;
     const retryDelay = 3000; // 3 seconds
     
@@ -154,11 +140,11 @@ function PriceChart({ onNotification }) {
         setLoading(false);
       }
     }
-  };
+  }, [selectedCrypto, timeRange, onNotification]);
 
   useEffect(() => {
     fetchChartData();
-  }, [selectedCrypto, timeRange]);
+  }, [selectedCrypto, timeRange, fetchChartData]);
 
   const formatPrice = (price) => {
     if (!price) return '$0.00';

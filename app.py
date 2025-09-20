@@ -12,6 +12,9 @@ from functools import wraps
 import time
 from collections import defaultdict
 import validators
+import bcrypt
+import jwt
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # Load environment variables
 load_dotenv()
@@ -76,6 +79,34 @@ class Alert(db.Model):
             'triggered_at': self.triggered_at.isoformat() if self.triggered_at else None
         }
 
+# User model for authentication
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    password_hash = db.Column(db.String(128), nullable=False)
+    telegram_chat_id = db.Column(db.String(50), nullable=True)  # User's Telegram chat ID
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    last_login = db.Column(db.DateTime, nullable=True)
+    
+    def set_password(self, password):
+        """Hash and set password"""
+        self.password_hash = generate_password_hash(password)
+    
+    def check_password(self, password):
+        """Check if provided password matches hash"""
+        return check_password_hash(self.password_hash, password)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'email': self.email,
+            'telegram_chat_id': self.telegram_chat_id,
+            'is_active': self.is_active,
+            'created_at': self.created_at.isoformat(),
+            'last_login': self.last_login.isoformat() if self.last_login else None
+        }
+
 # Security: Input validation
 def validate_crypto_symbol(symbol):
     if not symbol or not isinstance(symbol, str):
@@ -90,10 +121,82 @@ def validate_price(price):
         return False
 
 def validate_telegram_chat_id(chat_id):
-    if not chat_id or not isinstance(chat_id, str):
+    if not chat_id:
         return False
-    # Basic validation for Telegram chat ID format
-    return chat_id.replace('-', '').replace('@', '').isalnum()
+    
+    # Convert to string if it's a number
+    chat_id = str(chat_id)
+    
+    # Telegram chat IDs can be:
+    # - Positive numbers (user chats): 123456789
+    # - Negative numbers (group chats): -123456789
+    # - Usernames starting with @: @username
+    # - Channel IDs: -1001234567890
+    
+    # Check if it's a numeric ID (positive or negative)
+    if chat_id.lstrip('-').isdigit():
+        return True
+    
+    # Check if it's a username (starts with @)
+    if chat_id.startswith('@') and len(chat_id) > 1:
+        return True
+    
+    return False
+
+# Authentication utilities
+def validate_email(email):
+    """Validate email format"""
+    if not email or not isinstance(email, str):
+        return False
+    return validators.email(email)
+
+def validate_password(password):
+    """Validate password strength"""
+    if not password or not isinstance(password, str):
+        return False
+    # Password must be at least 8 characters
+    return len(password) >= 8
+
+def generate_jwt_token(user_id):
+    """Generate JWT token for user"""
+    payload = {
+        'user_id': user_id,
+        'exp': datetime.now(timezone.utc) + timedelta(days=7),  # Token expires in 7 days
+        'iat': datetime.now(timezone.utc)
+    }
+    return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
+
+def verify_jwt_token(token):
+    """Verify JWT token and return user_id"""
+    try:
+        payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+        return payload['user_id']
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
+def require_auth(f):
+    """Decorator to require authentication"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        token = request.headers.get('Authorization')
+        if not token:
+            return jsonify({'error': 'Authorization token required'}), 401
+        
+        # Remove 'Bearer ' prefix if present
+        if token.startswith('Bearer '):
+            token = token[7:]
+        
+        user_id = verify_jwt_token(token)
+        if not user_id:
+            return jsonify({'error': 'Invalid or expired token'}), 401
+        
+        # Add user_id to request context
+        request.current_user_id = user_id
+        return f(*args, **kwargs)
+    
+    return decorated_function
 
 # Crypto API Service
 class CryptoService:
@@ -255,108 +358,146 @@ def get_prices():
     return jsonify(prices)
 
 @app.route('/api/alerts', methods=['GET'])
+@require_auth
 @rate_limit
 def get_alerts():
-    """Get all active alerts"""
-    chat_id = request.args.get('chat_id')
-    
-    if not chat_id:
-        return jsonify({'error': 'chat_id parameter required'}), 400
-    
-    if not validate_telegram_chat_id(chat_id):
-        return jsonify({'error': 'Invalid chat_id format'}), 400
-    
-    alerts = Alert.query.filter_by(
-        telegram_chat_id=chat_id, 
-        is_active=True
-    ).all()
-    
-    return jsonify([alert.to_dict() for alert in alerts])
+    """Get all alerts for the authenticated user"""
+    try:
+        user = User.query.get(request.current_user_id)
+        if not user or not user.telegram_chat_id:
+            return jsonify({'error': 'Telegram chat ID not configured'}), 400
+        
+        alerts = Alert.query.filter_by(telegram_chat_id=user.telegram_chat_id, is_active=True).all()
+        return jsonify([alert.to_dict() for alert in alerts])
+        
+    except Exception as e:
+        app.logger.error(f"Get alerts error: {str(e)}")
+        return jsonify({'error': 'Failed to get alerts'}), 500
 
 @app.route('/api/alerts', methods=['POST'])
+@require_auth
 @rate_limit
 def create_alert():
-    """Create a new price alert"""
-    data = request.get_json()
-    
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-    
-    # Validate required fields
-    required_fields = ['crypto_symbol', 'threshold_price', 'is_above', 'telegram_chat_id']
-    for field in required_fields:
-        if field not in data:
-            return jsonify({'error': f'Missing required field: {field}'}), 400
-    
-    # Validate data
-    if not validate_crypto_symbol(data['crypto_symbol']):
-        return jsonify({'error': 'Invalid crypto symbol'}), 400
-    
-    if not validate_price(data['threshold_price']):
-        return jsonify({'error': 'Invalid threshold price'}), 400
-    
-    if not isinstance(data['is_above'], bool):
-        return jsonify({'error': 'is_above must be boolean'}), 400
-    
-    if not validate_telegram_chat_id(data['telegram_chat_id']):
-        return jsonify({'error': 'Invalid telegram chat ID'}), 400
-    
-    # Create alert
-    alert = Alert(
-        crypto_symbol=data['crypto_symbol'].upper(),
-        threshold_price=float(data['threshold_price']),
-        is_above=data['is_above'],
-        telegram_chat_id=data['telegram_chat_id']
-    )
-    
-    db.session.add(alert)
-    db.session.commit()
-    
-    return jsonify(alert.to_dict()), 201
+    """Create a new price alert for the authenticated user"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        # Get authenticated user
+        user = User.query.get(request.current_user_id)
+        if not user or not user.telegram_chat_id:
+            return jsonify({'error': 'Telegram chat ID not configured. Please set up Telegram integration first.'}), 400
+        
+        # Validate required fields
+        required_fields = ['crypto_symbol', 'threshold_price', 'is_above']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({'error': f'Missing required field: {field}'}), 400
+        
+        # Validate data
+        if not validate_crypto_symbol(data['crypto_symbol']):
+            return jsonify({'error': 'Invalid crypto symbol'}), 400
+        
+        if not validate_price(data['threshold_price']):
+            return jsonify({'error': 'Invalid threshold price'}), 400
+        
+        if not isinstance(data['is_above'], bool):
+            return jsonify({'error': 'is_above must be boolean'}), 400
+        
+        # Create alert using user's telegram_chat_id
+        alert = Alert(
+            crypto_symbol=data['crypto_symbol'].upper(),
+            threshold_price=float(data['threshold_price']),
+            is_above=data['is_above'],
+            telegram_chat_id=user.telegram_chat_id
+        )
+        
+        db.session.add(alert)
+        db.session.commit()
+        
+        app.logger.info(f"Alert created for user {user.email}: {data['crypto_symbol']} {data['threshold_price']}")
+        
+        return jsonify({
+            'message': 'Alert created successfully',
+            'alert': alert.to_dict()
+        }), 201
+        
+    except Exception as e:
+        app.logger.error(f"Create alert error: {str(e)}")
+        db.session.rollback()
+        return jsonify({'error': 'Failed to create alert'}), 500
 
 @app.route('/api/alerts/<int:alert_id>', methods=['DELETE'])
+@require_auth
 @rate_limit
 def delete_alert(alert_id):
-    """Delete an alert"""
-    chat_id = request.args.get('chat_id')
-    
-    if not chat_id:
-        return jsonify({'error': 'chat_id parameter required'}), 400
-    
-    alert = Alert.query.filter_by(
-        id=alert_id, 
-        telegram_chat_id=chat_id
-    ).first()
-    
-    if not alert:
-        return jsonify({'error': 'Alert not found'}), 404
-    
-    db.session.delete(alert)
-    db.session.commit()
-    
-    return jsonify({'message': 'Alert deleted successfully'})
+    """Delete an alert for the authenticated user"""
+    try:
+        user = User.query.get(request.current_user_id)
+        if not user or not user.telegram_chat_id:
+            return jsonify({'error': 'Telegram chat ID not configured'}), 400
+        
+        alert = Alert.query.filter_by(
+            id=alert_id, 
+            telegram_chat_id=user.telegram_chat_id
+        ).first()
+        
+        if not alert:
+            return jsonify({'error': 'Alert not found'}), 404
+        
+        db.session.delete(alert)
+        db.session.commit()
+        
+        app.logger.info(f"Alert deleted for user {user.email}: {alert.crypto_symbol}")
+        
+        return jsonify({'message': 'Alert deleted successfully'})
+        
+    except Exception as e:
+        app.logger.error(f"Delete alert error: {str(e)}")
+        db.session.rollback()
+        return jsonify({'error': 'Failed to delete alert'}), 500
 
 @app.route('/api/telegram/setup', methods=['POST'])
+@require_auth
 @rate_limit
 def setup_telegram():
-    """Setup Telegram integration"""
-    data = request.get_json()
-    
-    if not data or 'chat_id' not in data:
-        return jsonify({'error': 'chat_id required'}), 400
-    
-    chat_id = data['chat_id']
-    
-    if not validate_telegram_chat_id(chat_id):
-        return jsonify({'error': 'Invalid chat_id format'}), 400
-    
-    # Send test message
-    test_message = "🔔 <b>Crypto Price Alert Assistant</b>\n\nYour Telegram integration is now active! You'll receive price alerts here."
-    
-    if telegram_service.send_message(chat_id, test_message):
-        return jsonify({'message': 'Telegram setup successful'})
-    else:
-        return jsonify({'error': 'Failed to send test message'}), 500
+    """Setup Telegram integration for the authenticated user"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'chat_id' not in data:
+            return jsonify({'error': 'chat_id required'}), 400
+        
+        chat_id = data['chat_id']
+        
+        if not validate_telegram_chat_id(chat_id):
+            return jsonify({'error': 'Invalid chat_id format. Use numeric ID (e.g., 123456789) or username (e.g., @username)'}), 400
+        
+        # Get authenticated user
+        user = User.query.get(request.current_user_id)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Update user's telegram chat ID
+        user.telegram_chat_id = chat_id
+        db.session.commit()
+        
+        # Send test message
+        test_message = "🔔 <b>Crypto Price Alert Assistant</b>\n\nYour Telegram integration is now active! You'll receive price alerts here."
+        
+        if telegram_service.send_message(chat_id, test_message):
+            app.logger.info(f"Telegram setup successful for user {user.email}: {chat_id}")
+            return jsonify({'message': 'Telegram setup successful'})
+        else:
+            app.logger.error(f"Failed to send test message to chat_id: {chat_id}")
+            return jsonify({'error': 'Failed to send test message. Please check your chat ID.'}), 500
+        
+    except Exception as e:
+        app.logger.error(f"Telegram setup error: {str(e)}")
+        db.session.rollback()
+        return jsonify({'error': 'Failed to setup Telegram integration'}), 500
 
 @app.route('/api/chart-data', methods=['GET'])
 @rate_limit
@@ -408,6 +549,169 @@ def get_chart_data():
     except Exception as e:
         app.logger.error(f"Chart data error: {str(e)}")
         return jsonify({'error': 'Failed to fetch chart data'}), 500
+
+# Authentication endpoints
+@app.route('/api/auth/register', methods=['POST'])
+@rate_limit
+def register():
+    """Register a new user"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'Request data required'}), 400
+        
+        email = data.get('email', '').strip().lower()
+        password = data.get('password', '')
+        
+        # Validate input
+        if not validate_email(email):
+            return jsonify({'error': 'Invalid email format'}), 400
+        
+        if not validate_password(password):
+            return jsonify({'error': 'Password must be at least 8 characters long'}), 400
+        
+        # Check if user already exists
+        existing_user = User.query.filter_by(email=email).first()
+        if existing_user:
+            return jsonify({'error': 'Email already registered'}), 409
+        
+        # Create new user
+        user = User(email=email)
+        user.set_password(password)
+        
+        db.session.add(user)
+        db.session.commit()
+        
+        # Generate JWT token
+        token = generate_jwt_token(user.id)
+        
+        app.logger.info(f"New user registered: {email}")
+        
+        return jsonify({
+            'message': 'User registered successfully',
+            'token': token,
+            'user': user.to_dict()
+        }), 201
+        
+    except Exception as e:
+        app.logger.error(f"Registration error: {str(e)}")
+        db.session.rollback()
+        return jsonify({'error': 'Registration failed'}), 500
+
+@app.route('/api/auth/login', methods=['POST'])
+@rate_limit
+def login():
+    """Login user and return JWT token"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'Request data required'}), 400
+        
+        email = data.get('email', '').strip().lower()
+        password = data.get('password', '')
+        
+        # Validate input
+        if not validate_email(email):
+            return jsonify({'error': 'Invalid email format'}), 400
+        
+        if not password:
+            return jsonify({'error': 'Password required'}), 400
+        
+        # Find user
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            return jsonify({'error': 'Invalid email or password'}), 401
+        
+        # Check password
+        if not user.check_password(password):
+            return jsonify({'error': 'Invalid email or password'}), 401
+        
+        # Check if user is active
+        if not user.is_active:
+            return jsonify({'error': 'Account is deactivated'}), 403
+        
+        # Update last login
+        user.last_login = datetime.now(timezone.utc)
+        db.session.commit()
+        
+        # Generate JWT token
+        token = generate_jwt_token(user.id)
+        
+        app.logger.info(f"User logged in: {email}")
+        
+        return jsonify({
+            'message': 'Login successful',
+            'token': token,
+            'user': user.to_dict()
+        })
+        
+    except Exception as e:
+        app.logger.error(f"Login error: {str(e)}")
+        return jsonify({'error': 'Login failed'}), 500
+
+@app.route('/api/auth/me', methods=['GET'])
+@require_auth
+def get_current_user():
+    """Get current user information"""
+    try:
+        user = User.query.get(request.current_user_id)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        return jsonify({'user': user.to_dict()})
+        
+    except Exception as e:
+        app.logger.error(f"Get user error: {str(e)}")
+        return jsonify({'error': 'Failed to get user information'}), 500
+
+@app.route('/api/auth/logout', methods=['POST'])
+@require_auth
+def logout():
+    """Logout user (client-side token removal)"""
+    return jsonify({'message': 'Logout successful'})
+
+@app.route('/api/auth/update-telegram', methods=['POST'])
+@require_auth
+def update_telegram_chat_id():
+    """Update user's Telegram chat ID"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'Request data required'}), 400
+        
+        chat_id = data.get('chat_id', '').strip()
+        
+        # Validate chat ID
+        if not validate_telegram_chat_id(chat_id):
+            return jsonify({'error': 'Invalid chat_id format. Use numeric ID (e.g., 123456789) or username (e.g., @username)'}), 400
+        
+        # Get current user
+        user = User.query.get(request.current_user_id)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Update chat ID
+        user.telegram_chat_id = chat_id
+        db.session.commit()
+        
+        # Test Telegram connection
+        test_message = "🔔 <b>Crypto Price Alert Assistant</b>\n\nYour Telegram integration is now active! You'll receive price alerts here."
+        result = telegram_service.send_message(chat_id, test_message)
+        
+        if result:
+            app.logger.info(f"Telegram chat ID updated for user {user.email}: {chat_id}")
+            return jsonify({'message': 'Telegram chat ID updated successfully'})
+        else:
+            app.logger.error(f"Failed to send test message to chat_id: {chat_id}")
+            return jsonify({'error': 'Failed to send test message. Please check your chat ID.'}), 500
+        
+    except Exception as e:
+        app.logger.error(f"Update telegram error: {str(e)}")
+        db.session.rollback()
+        return jsonify({'error': 'Failed to update Telegram chat ID'}), 500
 
 # Background task for monitoring prices
 def check_alerts():

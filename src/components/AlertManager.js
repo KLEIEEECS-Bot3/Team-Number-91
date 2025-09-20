@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Plus, 
   Trash2, 
@@ -9,11 +9,13 @@ import {
   DollarSign,
   X
 } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
 import axios from 'axios';
 
 const API_BASE_URL = 'http://localhost:5000/api';
 
-function AlertManager({ telegramChatId, onNotification }) {
+function AlertManager({ onNotification }) {
+  const { token, user } = useAuth();
   const [alerts, setAlerts] = useState([]);
   const [cryptos, setCryptos] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -24,14 +26,7 @@ function AlertManager({ telegramChatId, onNotification }) {
     is_above: true
   });
 
-  useEffect(() => {
-    fetchCryptos();
-    if (telegramChatId) {
-      fetchAlerts();
-    }
-  }, [telegramChatId]);
-
-  const fetchCryptos = async () => {
+  const fetchCryptos = useCallback(async () => {
     try {
       const response = await axios.get(`${API_BASE_URL}/cryptos`);
       setCryptos(response.data);
@@ -41,56 +36,72 @@ function AlertManager({ telegramChatId, onNotification }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [onNotification]);
 
-  const fetchAlerts = async () => {
-    if (!telegramChatId) return;
+  const fetchAlerts = useCallback(async () => {
+    if (!token) return;
     
     try {
       const response = await axios.get(`${API_BASE_URL}/alerts`, {
-        params: { chat_id: telegramChatId }
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
       });
       setAlerts(response.data);
     } catch (error) {
       console.error('Error fetching alerts:', error);
       onNotification('Failed to fetch alerts', 'error');
     }
-  };
+  }, [token, onNotification]);
+
+  useEffect(() => {
+    fetchCryptos();
+    if (token) {
+      fetchAlerts();
+    } else {
+      setLoading(false);
+    }
+  }, [token, fetchCryptos, fetchAlerts]);
 
   const handleCreateAlert = async (e) => {
     e.preventDefault();
     
-    if (!telegramChatId) {
-      onNotification('Please set up Telegram first in Settings', 'warning');
+    if (!token) {
+      onNotification('Please log in to create alerts', 'warning');
       return;
     }
 
     try {
       const alertData = {
         ...newAlert,
-        telegram_chat_id: telegramChatId,
         threshold_price: parseFloat(newAlert.threshold_price)
       };
 
-      const response = await axios.post(`${API_BASE_URL}/alerts`, alertData);
+      const response = await axios.post(`${API_BASE_URL}/alerts`, alertData, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
       
-      setAlerts(prev => [response.data, ...prev]);
+      setAlerts(prev => [response.data.alert, ...prev]);
       setNewAlert({ crypto_symbol: '', threshold_price: '', is_above: true });
       setShowCreateForm(false);
       
       onNotification('Alert created successfully!', 'success');
     } catch (error) {
       console.error('Error creating alert:', error);
-      onNotification('Failed to create alert', 'error');
+      onNotification(error.response?.data?.error || 'Failed to create alert', 'error');
     }
   };
 
   const handleDeleteAlert = async (alertId) => {
-    if (!telegramChatId) return;
+    if (!token) return;
     
     try {
       await axios.delete(`${API_BASE_URL}/alerts/${alertId}`, {
-        params: { chat_id: telegramChatId }
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
       });
       
       setAlerts(prev => prev.filter(alert => alert.id !== alertId));
@@ -129,7 +140,7 @@ function AlertManager({ telegramChatId, onNotification }) {
       </div>
 
       {/* Setup Warning */}
-      {!telegramChatId && (
+      {!user?.telegram_chat_id && (
         <div className="card bg-orange-50 border-orange-200">
           <div className="flex items-start space-x-3">
             <AlertTriangle className="w-6 h-6 text-orange-600 mt-1" />
@@ -270,7 +281,7 @@ function AlertManager({ telegramChatId, onNotification }) {
             <button
               onClick={() => setShowCreateForm(true)}
               className="btn-primary"
-              disabled={!telegramChatId}
+              disabled={!user?.telegram_chat_id}
             >
               Create Your First Alert
             </button>

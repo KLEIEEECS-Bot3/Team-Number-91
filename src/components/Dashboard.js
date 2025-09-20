@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   TrendingUp, 
   TrendingDown, 
@@ -9,30 +9,32 @@ import {
   Shield,
   Zap
 } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
 import axios from 'axios';
 
 const API_BASE_URL = 'http://localhost:5000/api';
 
-function Dashboard({ telegramChatId, onNotification }) {
+const popularCryptos = [
+  { symbol: 'BTC', name: 'Bitcoin' },
+  { symbol: 'ETH', name: 'Ethereum' },
+  { symbol: 'ADA', name: 'Cardano' },
+  { symbol: 'DOT', name: 'Polkadot' },
+  { symbol: 'LINK', name: 'Chainlink' },
+  { symbol: 'UNI', name: 'Uniswap' },
+  { symbol: 'AAVE', name: 'Aave' },
+  { symbol: 'SOL', name: 'Solana' },
+  { symbol: 'MATIC', name: 'Polygon' },
+  { symbol: 'AVAX', name: 'Avalanche' }
+];
+
+function Dashboard({ onNotification }) {
+  const { token, user } = useAuth();
   const [cryptoPrices, setCryptoPrices] = useState({});
   const [loading, setLoading] = useState(true);
   const [alerts, setAlerts] = useState([]);
   const [lastUpdate, setLastUpdate] = useState(null);
 
-  const popularCryptos = [
-    { symbol: 'BTC', name: 'Bitcoin' },
-    { symbol: 'ETH', name: 'Ethereum' },
-    { symbol: 'ADA', name: 'Cardano' },
-    { symbol: 'DOT', name: 'Polkadot' },
-    { symbol: 'LINK', name: 'Chainlink' },
-    { symbol: 'UNI', name: 'Uniswap' },
-    { symbol: 'AAVE', name: 'Aave' },
-    { symbol: 'SOL', name: 'Solana' },
-    { symbol: 'MATIC', name: 'Polygon' },
-    { symbol: 'AVAX', name: 'Avalanche' }
-  ];
-
-  const fetchPrices = async (retryCount = 0) => {
+  const fetchPrices = useCallback(async (retryCount = 0) => {
     const maxRetries = 5;
     const retryDelay = 2000; // 2 seconds
     
@@ -59,20 +61,22 @@ function Dashboard({ telegramChatId, onNotification }) {
         setLoading(false);
       }
     }
-  };
+  }, [onNotification]);
 
-  const fetchAlerts = async () => {
-    if (!telegramChatId) return;
+  const fetchAlerts = useCallback(async () => {
+    if (!token) return;
     
     try {
       const response = await axios.get(`${API_BASE_URL}/alerts`, {
-        params: { chat_id: telegramChatId }
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
       });
       setAlerts(response.data);
     } catch (error) {
       console.error('Error fetching alerts:', error);
     }
-  };
+  }, [token]);
 
   useEffect(() => {
     fetchPrices();
@@ -81,7 +85,7 @@ function Dashboard({ telegramChatId, onNotification }) {
     // Refresh prices every 30 seconds
     const interval = setInterval(fetchPrices, 30000);
     return () => clearInterval(interval);
-  }, [telegramChatId]);
+  }, [token, fetchPrices, fetchAlerts]);
 
   const formatPrice = (price) => {
     if (!price) return 'N/A';
@@ -212,7 +216,7 @@ function Dashboard({ telegramChatId, onNotification }) {
       </div>
 
       {/* Setup Reminder */}
-      {!telegramChatId && (
+      {!user?.telegram_chat_id && (
         <div className="card bg-orange-50 border-orange-200">
           <div className="flex items-start space-x-3">
             <AlertTriangle className="w-6 h-6 text-orange-600 mt-1" />
