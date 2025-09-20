@@ -90,27 +90,10 @@ def validate_price(price):
         return False
 
 def validate_telegram_chat_id(chat_id):
-    if not chat_id:
+    if not chat_id or not isinstance(chat_id, str):
         return False
-    
-    # Convert to string if it's a number
-    chat_id = str(chat_id)
-    
-    # Telegram chat IDs can be:
-    # - Positive numbers (user chats): 123456789
-    # - Negative numbers (group chats): -123456789
-    # - Usernames starting with @: @username
-    # - Channel IDs: -1001234567890
-    
-    # Check if it's a numeric ID (positive or negative)
-    if chat_id.lstrip('-').isdigit():
-        return True
-    
-    # Check if it's a username (starts with @)
-    if chat_id.startswith('@') and len(chat_id) > 1:
-        return True
-    
-    return False
+    # Basic validation for Telegram chat ID format
+    return chat_id.replace('-', '').replace('@', '').isalnum()
 
 # Crypto API Service
 class CryptoService:
@@ -204,9 +187,6 @@ class TelegramService:
         
     def send_message(self, chat_id, message):
         """Send message via Telegram bot"""
-        app.logger.info(f"TelegramService.send_message called with chat_id: {chat_id}")
-        app.logger.info(f"Bot token configured: {bool(self.bot_token and self.bot_token != 'your-telegram-bot-token')}")
-        
         if not self.bot_token or self.bot_token == 'your-telegram-bot-token':
             app.logger.warning("Telegram bot token not configured - using demo mode")
             print(f"📱 DEMO: Would send to chat {chat_id}: {message}")
@@ -220,16 +200,12 @@ class TelegramService:
                 'parse_mode': 'HTML'
             }
             
-            app.logger.info(f"Sending request to Telegram API: {url}")
             response = requests.post(url, data=data, timeout=10)
-            app.logger.info(f"Telegram API response status: {response.status_code}")
-            
             response.raise_for_status()
-            app.logger.info("Telegram message sent successfully")
             return True
             
         except Exception as e:
-            app.logger.error(f"Error sending Telegram message: {e}", exc_info=True)
+            app.logger.error(f"Error sending Telegram message: {e}")
             return False
 
 # Initialize services
@@ -364,41 +340,23 @@ def delete_alert(alert_id):
 @rate_limit
 def setup_telegram():
     """Setup Telegram integration"""
-    try:
-        app.logger.info("Telegram setup request received")
-        data = request.get_json()
-        app.logger.info(f"Request data: {data}")
-        
-        if not data or 'chat_id' not in data:
-            app.logger.warning("Missing chat_id in request")
-            return jsonify({'error': 'chat_id required'}), 400
-        
-        chat_id = data['chat_id']
-        app.logger.info(f"Validating chat_id: {chat_id}")
-        
-        if not validate_telegram_chat_id(chat_id):
-            app.logger.warning(f"Invalid chat_id format: {chat_id}")
-            return jsonify({'error': 'Invalid chat_id format. Use numeric ID (e.g., 123456789) or username (e.g., @username)'}), 400
-        
-        app.logger.info(f"Chat ID validation passed: {chat_id}")
-        
-        # Send test message
-        test_message = "🔔 <b>Crypto Price Alert Assistant</b>\n\nYour Telegram integration is now active! You'll receive price alerts here."
-        app.logger.info(f"Sending test message to chat_id: {chat_id}")
-        
-        result = telegram_service.send_message(chat_id, test_message)
-        app.logger.info(f"Telegram send_message result: {result}")
-        
-        if result:
-            app.logger.info("Telegram setup successful")
-            return jsonify({'message': 'Telegram setup successful'})
-        else:
-            app.logger.error("Failed to send test message")
-            return jsonify({'error': 'Failed to send test message. Please check your bot token and chat ID.'}), 500
-            
-    except Exception as e:
-        app.logger.error(f"Telegram setup error: {str(e)}", exc_info=True)
-        return jsonify({'error': f'Setup failed due to server error: {str(e)}'}), 500
+    data = request.get_json()
+    
+    if not data or 'chat_id' not in data:
+        return jsonify({'error': 'chat_id required'}), 400
+    
+    chat_id = data['chat_id']
+    
+    if not validate_telegram_chat_id(chat_id):
+        return jsonify({'error': 'Invalid chat_id format'}), 400
+    
+    # Send test message
+    test_message = "🔔 <b>Crypto Price Alert Assistant</b>\n\nYour Telegram integration is now active! You'll receive price alerts here."
+    
+    if telegram_service.send_message(chat_id, test_message):
+        return jsonify({'message': 'Telegram setup successful'})
+    else:
+        return jsonify({'error': 'Failed to send test message'}), 500
 
 @app.route('/api/chart-data', methods=['GET'])
 @rate_limit
